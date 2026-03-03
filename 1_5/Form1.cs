@@ -77,20 +77,32 @@ public partial class Form1 : Form
         {
             _xmlDoc = XDocument.Load(_xmlPath);
 
-            var docs = GetRealizaciyaDocs(_xmlDoc);
+            var realDocs = GetElements(_xmlDoc, "Документ.РеализацияТоваровУслуг");
+            var dogDocs = GetElements(_xmlDoc, "Справочник.Договоры");
 
-            _lstDocs.Items.Add($"Всего блоков Документ.РеализацияТоваровУслуг: {docs.Count}");
+            _lstDocs.Items.Add($"Документ.РеализацияТоваровУслуг: {realDocs.Count}");
+            _lstDocs.Items.Add($"Справочник.Договоры:              {dogDocs.Count}");
             _lstDocs.Items.Add(new string('-', 90));
-            foreach (var doc in docs)
+
+            foreach (var doc in realDocs)
             {
                 string num = doc.Descendants(NsBody + "Номер").FirstOrDefault()?.Value ?? "?";
                 string date = doc.Descendants(NsBody + "Дата").FirstOrDefault()?.Value ?? "?";
                 int rows = doc.Descendants(NsBody + "Строка").Count();
-                _lstDocs.Items.Add($"№ {num}  |  {date}  |  товаров: {rows}");
+                _lstDocs.Items.Add($"[Реализация] № {num}  |  {date}  |  товаров: {rows}");
+            }
+
+            foreach (var doc in dogDocs)
+            {
+                string name = doc.Descendants(NsBody + "Наименование").FirstOrDefault()?.Value ?? "?";
+                string kont = doc.Descendants(NsBody + "Контрагент")
+                    .FirstOrDefault()
+                    ?.Element(NsBody + "Наименование")?.Value ?? "?";
+                _lstDocs.Items.Add($"[Договор] {name}  |  {kont}");
             }
 
             _btnExport.Enabled = true;
-            SetStatus($"✔ Найдено {docs.Count} документов реализации", false);
+            SetStatus($"✔ Реализаций: {realDocs.Count}, Договоров: {dogDocs.Count}", false);
         }
         catch (Exception ex)
         {
@@ -150,31 +162,36 @@ public partial class Form1 : Form
     }
 
     // ─── Получить все блоки Документ.РеализацияТоваровУслуг ──────────────
-    private static List<XElement> GetRealizaciyaDocs(XDocument doc)
-        => doc.Descendants(NsBody + "Документ.РеализацияТоваровУслуг").ToList();
+    private static List<XElement> GetElements(XDocument doc, string localName)
+        => doc.Descendants(NsBody + localName).ToList();
 
     // ─── Собрать итоговый XML: только РеализацияТоваровУслуг + замена ссылок
     private static string BuildXml(XDocument sourceDoc, Dictionary<string, string> refMap)
     {
-        // Берём оригинальный корень и Header как есть
         var root = sourceDoc.Root ?? throw new Exception("Пустой XML");
         var header = root.Element(NsMsg + "Header");
         var body = root.Element(NsBody + "Body");
 
         if (body == null) throw new Exception("Элемент Body не найден");
 
-        // Оставляем только нужные документы, клонируем их
-        var docs = body.Elements(NsBody + "Документ.РеализацияТоваровУслуг")
-            .Select(d => ApplyRefMap(new XElement(d), refMap)) // глубокий клон + замена
+        // РеализацияТоваровУслуг — с заменой ссылок номенклатуры
+        var realDocs = body.Elements(NsBody + "Документ.РеализацияТоваровУслуг")
+            .Select(d => ApplyRefMap(new XElement(d), refMap))
             .ToList();
 
-        // Строим новый XML с той же структурой
+        // Справочник.Договоры — без изменений, идут первыми в Body
+        var dogDocs = body.Elements(NsBody + "Справочник.Договоры")
+            .Select(d => new XElement(d))
+            .ToList();
+
+        var allElements = dogDocs.Concat(realDocs).Cast<object>().ToArray();
+
         var newRoot = new XElement(root.Name,
-            root.Attributes(), // xmlns:msg, xmlns:xs, xmlns:xsi
-            header != null ? new XElement(header) : null, // Header как есть
+            root.Attributes(),
+            header != null ? new XElement(header) : null,
             new XElement(NsBody + "Body",
                 body.Attributes(),
-                docs
+                allElements
             )
         );
 
@@ -188,10 +205,7 @@ public partial class Form1 : Form
         };
 
         using var xw = System.Xml.XmlWriter.Create(sb, settings);
-        new XDocument(
-            new XDeclaration("1.0", "utf-8", null),
-            newRoot
-        ).WriteTo(xw);
+        new XDocument(new XDeclaration("1.0", "utf-8", null), newRoot).WriteTo(xw);
         xw.Flush();
 
         return sb.ToString();
