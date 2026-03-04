@@ -12,6 +12,9 @@ public partial class Form1 : Form
     private static readonly XNamespace NsBody = "http://v8.1c.ru/edi/edi_stnd/EnterpriseData/1.17";
     private static readonly XNamespace NsMsg = "http://www.1c.ru/SSL/Exchange/Message";
 
+    // Фиксированная ссылка склада — заменяется во всех блоках <Склад>
+    private const string SkladSsylka = "9a4d3962-da4b-11f0-910a-fa163e20c8f3";
+
     private string? _xmlPath;
     private XDocument? _xmlDoc;
 
@@ -42,8 +45,21 @@ public partial class Form1 : Form
     };
 
     private readonly ListBox _lstDocs = new()
-        { Left = 12, Top = 128, Width = 760, Height = 400, Font = new System.Drawing.Font("Consolas", 9f) };
+        { Left = 12, Top = 128, Width = 760, Height = 260, Font = new System.Drawing.Font("Consolas", 9f) };
 
+    private readonly Label _lblNotFound = new()
+    {
+        Text = "Не найденные артикулы:", Left = 12, Top = 388,
+        Width = 300, Height = 18, AutoSize = false
+    };
+
+    private readonly TextBox _txtNotFound = new()
+    {
+        Left = 12, Top = 408, Width = 760, Height = 120,
+        Multiline = true, ScrollBars = ScrollBars.Vertical,
+        ReadOnly = true, BackColor = System.Drawing.Color.White,
+        Font = new System.Drawing.Font("Consolas", 9f)
+    };
 
     public Form1()
     {
@@ -52,7 +68,10 @@ public partial class Form1 : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         Controls.AddRange(
-            new Control[] { _btnOpenXml, _btnLoadRef, _btnExport, _lblXml, _lblRef, _lblStatus, _lstDocs });
+            new Control[]
+            {
+                _btnOpenXml, _btnLoadRef, _btnExport, _lblXml, _lblRef, _lblStatus, _lstDocs, _txtNotFound, _lblNotFound
+            });
         _btnOpenXml.Click += BtnOpenXml_Click;
         _btnLoadRef.Click += BtnLoadRef_Click;
         _btnExport.Click += BtnExport_Click;
@@ -72,6 +91,7 @@ public partial class Form1 : Form
         _lblXml.Text = "XML файл: " + _xmlPath;
         SetStatus("Загрузка...", false);
         _lstDocs.Items.Clear();
+        _txtNotFound.Clear();
 
         try
         {
@@ -81,7 +101,7 @@ public partial class Form1 : Form
             var dogDocs = GetElements(_xmlDoc, "Справочник.Договоры");
 
             _lstDocs.Items.Add($"Документ.РеализацияТоваровУслуг: {realDocs.Count}");
-            _lstDocs.Items.Add($"Справочник.Договоры:              {dogDocs.Count}");
+            // _lstDocs.Items.Add($"Справочник.Договоры:              {dogDocs.Count}");
             _lstDocs.Items.Add(new string('-', 90));
 
             foreach (var doc in realDocs)
@@ -92,17 +112,18 @@ public partial class Form1 : Form
                 _lstDocs.Items.Add($"[Реализация] № {num}  |  {date}  |  товаров: {rows}");
             }
 
-            foreach (var doc in dogDocs)
-            {
-                string name = doc.Descendants(NsBody + "Наименование").FirstOrDefault()?.Value ?? "?";
-                string kont = doc.Descendants(NsBody + "Контрагент")
-                    .FirstOrDefault()
-                    ?.Element(NsBody + "Наименование")?.Value ?? "?";
-                _lstDocs.Items.Add($"[Договор] {name}  |  {kont}");
-            }
+            // foreach (var doc in dogDocs)
+            // {
+            //     string name = doc.Descendants(NsBody + "Наименование").FirstOrDefault()?.Value ?? "?";
+            //     string kont = doc.Descendants(NsBody + "Контрагент")
+            //         .FirstOrDefault()
+            //         ?.Element(NsBody + "Наименование")?.Value ?? "?";
+            //     _lstDocs.Items.Add($"[Договор] {name}  |  {kont}");
+            // }
 
             _btnExport.Enabled = true;
             SetStatus($"✔ Реализаций: {realDocs.Count}, Договоров: {dogDocs.Count}", false);
+            SetStatus($"✔ Реализаций: {realDocs.Count}", false);
         }
         catch (Exception ex)
         {
@@ -149,10 +170,30 @@ public partial class Form1 : Form
 
         try
         {
-            string result = BuildXml(_xmlDoc, _refMap);
+            var notFound = new List<string>();
+            string result = BuildXml(_xmlDoc, _refMap, notFound);
             File.WriteAllText(dlg.FileName, result, new UTF8Encoding(false));
-            SetStatus($"✔ Сохранено: {dlg.FileName}", false);
-            MessageBox.Show($"Готово!\n{dlg.FileName}", "Успех", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            // Показываем не найденные артикулы в текстовом поле
+            var distinct = notFound.Distinct().OrderBy(x => x).ToList();
+            if (distinct.Count > 0)
+            {
+                _txtNotFound.Text = string.Join(Environment.NewLine, distinct);
+                SetStatus($"✔ Сохранено. ⚠ Не найдено артикулов: {distinct.Count}", true);
+                MessageBox.Show(
+                    $"Файл сохранён, но {distinct.Count} артикул(ов) не найдено в файле замен.\nСписок — в поле внизу, можно скопировать.",
+                    "⚠ Не найдены артикулы",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning
+                );
+            }
+            else
+            {
+                _txtNotFound.Clear();
+                SetStatus($"✔ Сохранено: {dlg.FileName}", false);
+                MessageBox.Show($"Готово! Все артикулы заменены.\n{dlg.FileName}", "Успех", MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
         }
         catch (Exception ex)
         {
@@ -165,72 +206,117 @@ public partial class Form1 : Form
     private static List<XElement> GetElements(XDocument doc, string localName)
         => doc.Descendants(NsBody + localName).ToList();
 
-    // ─── Собрать итоговый XML: только РеализацияТоваровУслуг + замена ссылок
-    private static string BuildXml(XDocument sourceDoc, Dictionary<string, string> refMap)
+    // ─── Сборка итогового XML ─────────────────────────────────────────────
+    private static string BuildXml(XDocument sourceDoc, Dictionary<string, string> refMap, List<string> notFound)
     {
         var root = sourceDoc.Root ?? throw new Exception("Пустой XML");
         var header = root.Element(NsMsg + "Header");
         var body = root.Element(NsBody + "Body");
-
         if (body == null) throw new Exception("Элемент Body не найден");
 
-        // РеализацияТоваровУслуг — с заменой ссылок номенклатуры
         var realDocs = body.Elements(NsBody + "Документ.РеализацияТоваровУслуг")
-            .Select(d => ApplyRefMap(new XElement(d), refMap))
-            .ToList();
+            .Select(d =>
+            {
+                var clone = new XElement(d);
+                ApplyRefMap(clone, refMap, notFound);
+                ApplySkladSsylka(clone);
+                RemoveDogov(clone); // ← добавить сюда
 
-        // Справочник.Договоры — без изменений, идут первыми в Body
-        var dogDocs = body.Elements(NsBody + "Справочник.Договоры")
-            .Select(d => new XElement(d))
-            .ToList();
+                return clone;
+            }).ToList();
 
-        var allElements = dogDocs.Concat(realDocs).Cast<object>().ToArray();
+        // var dogDocs = body.Elements(NsBody + "Справочник.Договоры")
+        //     .Select(d =>
+        //     {
+        //         var clone = new XElement(d);
+        //         ApplyDogNomer(clone); // добавляем <Номер> из <Наименование>
+        //         return clone;
+        //     }).ToList();
+
+        // var allElements = dogDocs.Concat(realDocs).Cast<object>().ToArray();
+
+        var allElements = realDocs.Cast<object>().ToArray();
 
         var newRoot = new XElement(root.Name,
             root.Attributes(),
             header != null ? new XElement(header) : null,
-            new XElement(NsBody + "Body",
-                body.Attributes(),
-                allElements
-            )
+            new XElement(NsBody + "Body", body.Attributes(), allElements)
         );
 
         var sb = new StringBuilder();
         var settings = new System.Xml.XmlWriterSettings
         {
-            Indent = true,
-            IndentChars = "  ",
+            Indent = true, IndentChars = "  ",
             Encoding = new UTF8Encoding(false),
             OmitXmlDeclaration = false
         };
-
         using var xw = System.Xml.XmlWriter.Create(sb, settings);
         new XDocument(new XDeclaration("1.0", "utf-8", null), newRoot).WriteTo(xw);
         xw.Flush();
-
         return sb.ToString();
+    }
+
+
+    // ─── Добавить <Номер> после <Дата> в КлючевыеСвойства договора ────────
+    // Значение берётся из <Наименование> того же КлючевыеСвойства
+    // private static void ApplyDogNomer(XElement doc)
+    // {
+    //     var kp = doc.Element(NsBody + "КлючевыеСвойства");
+    //     if (kp == null) return;
+    //
+    //     // Если тег уже есть — не дублируем
+    //     if (kp.Element(NsBody + "Номер") != null) return;
+    //
+    //     var naim = kp.Element(NsBody + "Наименование");
+    //     var data = kp.Element(NsBody + "Дата");
+    //     if (naim == null) return;
+    //
+    //     var nomerEl = new XElement(NsBody + "Номер", naim.Value);
+    //
+    //     if (data != null)
+    //         data.AddAfterSelf(nomerEl); // вставляем сразу после <Дата>
+    //     else
+    //         naim.AddAfterSelf(nomerEl); // или после <Наименование> если нет <Дата>
+    // }
+
+    // ─── Замена Ссылки склада на фиксированное значение ───────────────────
+    private static void ApplySkladSsylka(XElement doc)
+    {
+        foreach (var sklad in doc.Descendants(NsBody + "Склад"))
+        {
+            var ssylka = sklad.Element(NsBody + "Ссылка");
+            if (ssylka != null)
+                ssylka.Value = SkladSsylka;
+        }
+    }
+
+    // ─── Удалить блок <Договор> из ДанныеВзаиморасчетов ───────────────────
+    private static void RemoveDogov(XElement doc)
+    {
+        foreach (var dogov in doc.Descendants(NsBody + "Договор").ToList())
+            dogov.Remove();
     }
 
     // ─── Применить замену ссылок к одному документу ───────────────────────
     // Ищем все Номенклатура внутри документа,
     // берём Артикул, ищем в словаре, если нашли — меняем Ссылка
-    private static XElement ApplyRefMap(XElement doc, Dictionary<string, string> refMap)
+    // ─── Замена Ссылки в Номенклатура по Артикулу ─────────────────────────
+    private static void ApplyRefMap(XElement doc, Dictionary<string, string> refMap, List<string> notFound)
     {
-        if (refMap.Count == 0) return doc; // замен нет — возвращаем как есть
+        if (refMap.Count == 0) return;
 
         foreach (var nom in doc.Descendants(NsBody + "Номенклатура"))
         {
             var artikulEl = nom.Element(NsBody + "Артикул");
             var ssylkaEl = nom.Element(NsBody + "Ссылка");
-
             if (artikulEl == null || ssylkaEl == null) continue;
 
             string article = artikulEl.Value.Trim();
             if (refMap.TryGetValue(article, out string? newRef))
                 ssylkaEl.Value = newRef;
+            else
+                notFound.Add(article); // артикул не найден — запоминаем
         }
-
-        return doc;
     }
 
     // ─── Чтение файла замен: Артикул (col 4) -> Ссылка (col 2) ───────────
